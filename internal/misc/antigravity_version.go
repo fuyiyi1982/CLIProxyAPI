@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -16,10 +17,13 @@ import (
 )
 
 const (
-	// antigravityFallbackVersion is the client version reported when the hub
-	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
-	// newer models for clients below 2.23.0, so this floor must stay at or above
-	// that version.
+	// antigravityCLIVersion and related fields match the native @google/antigravity-cli
+	// wire profile (antigravity/cli/1.3.5).
+	antigravityCLIVersion    = "1.3.5"
+	antigravityCLIChangelist = "998863838"
+	antigravityCLIAuthMethod = "consumer"
+
+	// antigravityFallbackVersion is retained for hub-manifest helpers when queried directly.
 	antigravityFallbackVersion = "2.29.0"
 	antigravityHubPlatform     = "os_type=darwin; arch=arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
@@ -53,13 +57,9 @@ var (
 	antigravityUpdaterOnce   sync.Once
 )
 
-// StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
-// This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
-func StartAntigravityVersionUpdater(ctx context.Context) {
-	antigravityUpdaterOnce.Do(func() {
-		go runAntigravityVersionUpdater(ctx)
-	})
-}
+// StartAntigravityVersionUpdater is a no-op for the Antigravity CLI wire profile;
+// background hub manifest polling is disabled to eliminate non-interactive probes.
+func StartAntigravityVersionUpdater(_ context.Context) {}
 
 func runAntigravityVersionUpdater(ctx context.Context) {
 	if ctx == nil {
@@ -122,18 +122,22 @@ func AntigravityLatestVersion() string {
 	return antigravityFallbackVersion
 }
 
-// AntigravityUserAgent returns the User-Agent string used by the Antigravity Hub family.
+// AntigravityUserAgent returns the User-Agent string matching the native Antigravity CLI wire profile.
 func AntigravityUserAgent() string {
-	version := AntigravityLatestVersion()
-	metadata := "aidev_client; " + antigravityHubPlatform
-	if changelist := antigravityHubChangelists[version]; changelist != "" {
-		metadata += "; cl=" + changelist
-	}
-	return fmt.Sprintf("antigravity/hub/%s (%s)", version, metadata)
+	return fmt.Sprintf(
+		"antigravity/cli/%s (aidev_client; os_type=%s; arch=%s; cl=%s; auth_method=%s)",
+		antigravityCLIVersion,
+		runtime.GOOS,
+		runtime.GOARCH,
+		antigravityCLIChangelist,
+		antigravityCLIAuthMethod,
+	)
 }
 
 func isAntigravityFamilyUserAgent(lower string) bool {
-	return strings.HasPrefix(lower, "antigravity/hub/") || strings.HasPrefix(lower, "antigravity/")
+	return strings.HasPrefix(lower, "antigravity/cli/") ||
+		strings.HasPrefix(lower, "antigravity/hub/") ||
+		strings.HasPrefix(lower, "antigravity/")
 }
 
 func antigravityBaseUserAgent(userAgent string) string {
@@ -187,30 +191,20 @@ func AntigravityOnboardUserUserAgent(userAgent string) string {
 func AntigravityVersionFromUserAgent(userAgent string) string {
 	base := antigravityBaseUserAgent(userAgent)
 	lower := strings.ToLower(base)
-	if strings.HasPrefix(lower, "antigravity/hub/") {
-		rest := base[len("antigravity/hub/"):]
-		if idx := strings.IndexAny(rest, " 	"); idx >= 0 {
-			rest = rest[:idx]
+	for _, prefix := range []string{"antigravity/cli/", "antigravity/hub/", "antigravity/"} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := base[len(prefix):]
+			if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+				rest = rest[:idx]
+			}
+			rest = strings.TrimSpace(rest)
+			if rest == "" {
+				return antigravityCLIVersion
+			}
+			return rest
 		}
-		rest = strings.TrimSpace(rest)
-		if rest == "" {
-			return AntigravityLatestVersion()
-		}
-		return rest
 	}
-	const legacyPrefix = "antigravity/"
-	if !strings.HasPrefix(lower, legacyPrefix) {
-		return AntigravityLatestVersion()
-	}
-	rest := base[len(legacyPrefix):]
-	if idx := strings.IndexAny(rest, " 	"); idx >= 0 {
-		rest = rest[:idx]
-	}
-	rest = strings.TrimSpace(rest)
-	if rest == "" {
-		return AntigravityLatestVersion()
-	}
-	return rest
+	return antigravityCLIVersion
 }
 
 func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {

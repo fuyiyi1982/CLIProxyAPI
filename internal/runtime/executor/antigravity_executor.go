@@ -41,7 +41,7 @@ const (
 	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret                = "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"
 	antigravityAuthType                    = "antigravity"
-	antigravityRequestTokenSafetyWindow    = 5 * time.Minute
+	antigravityRequestTokenSafetyWindow    = 30 * time.Second
 	antigravityCreditsHintRefreshInterval  = cliproxyauth.AntigravityCreditsHintRefreshInterval
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
@@ -55,6 +55,8 @@ type AntigravityExecutor struct {
 	matcherMu     sync.RWMutex
 	lastWordsKey  string
 	cachedMatcher *helps.SensitiveWordMatcher
+	sessionMu     sync.Mutex
+	sessionStore  *helps.AgySessionStore
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -65,7 +67,32 @@ type AntigravityExecutor struct {
 // Returns:
 //   - *AntigravityExecutor: A new Antigravity executor instance
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
-	return &AntigravityExecutor{cfg: cfg}
+	return &AntigravityExecutor{
+		cfg:          cfg,
+		sessionStore: helps.NewAgySessionStore(),
+	}
+}
+
+func (e *AntigravityExecutor) getSessionStore() *helps.AgySessionStore {
+	if e == nil {
+		return nil
+	}
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	if e.sessionStore == nil {
+		e.sessionStore = helps.NewAgySessionStore()
+	}
+	return e.sessionStore
+}
+
+// CloseAuthExecutionSessions evicts tracked trajectory state for a removed credential.
+func (e *AntigravityExecutor) CloseAuthExecutionSessions(authID string) {
+	if e == nil {
+		return
+	}
+	if store := e.getSessionStore(); store != nil {
+		store.DeleteAuth(authID)
+	}
 }
 
 func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
@@ -177,26 +204,23 @@ type antigravityPoolSettings struct {
 }
 
 func resolveAntigravityPoolSettings(cfg *config.Config) antigravityPoolSettings {
-	// By default, upstream connection pooling is disabled (shortMode = true, maxIdleConnsPerHost = -1)
-	// to prevent socket buildup and stale connection errors across rotating credentials.
+	// Default to pooled HTTP/1.1 keep-alive (2 idle conns/host, 30s timeout) matching
+	// the native Antigravity CLI runtime profile unless explicitly disabled.
 	settings := antigravityPoolSettings{
-		shortMode:           true,
-		maxIdleConnsPerHost: -1,
-		idleConnTimeout:     0,
+		shortMode:           false,
+		maxIdleConnsPerHost: antigravityDefaultMaxIdleConnsPerHost,
+		idleConnTimeout:     antigravityDefaultIdleConnTimeout,
 	}
 	if cfg == nil {
 		return settings
 	}
 
-	// Pooling is active ONLY when explicitly enabled: true
-	if cfg.Antigravity.ConnectionPool.Enabled == nil || !*cfg.Antigravity.ConnectionPool.Enabled {
+	if cfg.Antigravity.ConnectionPool.Enabled != nil && !*cfg.Antigravity.ConnectionPool.Enabled {
+		settings.shortMode = true
+		settings.maxIdleConnsPerHost = -1
+		settings.idleConnTimeout = 0
 		return settings
 	}
-
-	// Enabled is true: initialize default pool settings
-	settings.shortMode = false
-	settings.idleConnTimeout = antigravityDefaultIdleConnTimeout
-	settings.maxIdleConnsPerHost = antigravityDefaultMaxIdleConnsPerHost
 
 	rawTimeout := strings.TrimSpace(cfg.Antigravity.ConnectionPool.IdleConnTimeout)
 	if rawTimeout != "" {
@@ -300,6 +324,7 @@ func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *htt
 	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
 	clone.TLSClientConfig.NextProtos = nil
 	applyAntigravityPoolLimits(clone, cfgs...)
+	helps.WrapTransportWithAgyWireOrder(clone)
 	return clone
 }
 

@@ -471,10 +471,12 @@ func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 		t.Fatalf("x-extra should be preserved outside schema cleanup path, got=%v", nonSchema["x-extra"])
 	}
 
-	if generationConfig, ok := request["generationConfig"].(map[string]any); ok {
-		if _, ok := generationConfig["maxOutputTokens"]; ok {
-			t.Fatalf("maxOutputTokens should still be removed for non-Claude requests")
-		}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != 128 {
+		t.Fatalf("maxOutputTokens should be preserved for native Antigravity requests, got=%v", generationConfig["maxOutputTokens"])
 	}
 }
 

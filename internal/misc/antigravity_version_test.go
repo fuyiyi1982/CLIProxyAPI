@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -62,29 +63,30 @@ func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
 	}
 }
 
-func TestAntigravityUserAgentUsesHubFamily(t *testing.T) {
-	for _, tc := range []struct {
-		version string
-		want    string
-	}{
-		{"2.23.0", "antigravity/hub/2.23.0 (aidev_client; os_type=darwin; arch=arm64; cl=998057262)"},
-		{"2.24.0", "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"},
-		{"2.29.0", "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"},
-		{"2.30.0", "antigravity/hub/2.30.0 (aidev_client; os_type=darwin; arch=arm64)"},
-	} {
-		t.Run(tc.version, func(t *testing.T) {
-			restore := overrideAntigravityVersionCacheForTest(t, tc.version, time.Now().Add(time.Hour))
-			defer restore()
-			if got := AntigravityUserAgent(); got != tc.want {
-				t.Fatalf("AntigravityUserAgent() = %q, want %q", got, tc.want)
-			}
-		})
+func TestAntigravityUserAgentUsesCLIFamily(t *testing.T) {
+	restore := overrideAntigravityVersionCacheForTest(t, "2.29.0", time.Now().Add(time.Hour))
+	defer restore()
+
+	want := fmt.Sprintf("antigravity/cli/1.3.5 (aidev_client; os_type=%s; arch=%s; cl=998863838; auth_method=consumer)", runtime.GOOS, runtime.GOARCH)
+	if got := AntigravityUserAgent(); got != want {
+		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
 	}
 }
 
 func TestAntigravityFallbackVersionHasMatchingChangelist(t *testing.T) {
 	if antigravityHubChangelists[antigravityFallbackVersion] == "" {
 		t.Fatal("fallback version must be updated together with its verified changelist")
+	}
+}
+
+func TestAntigravityVersionFromUserAgentParsesCLIFamily(t *testing.T) {
+	for _, userAgent := range []string{
+		"antigravity/cli/1.3.5 (aidev_client; os_type=linux; arch=amd64; cl=998863838; auth_method=consumer)",
+		"antigravity/cli/1.3.5 (aidev_client; os_type=darwin; arch=arm64; cl=998863838; auth_method=consumer) google-api-nodejs-client/10.3.0",
+	} {
+		if got := AntigravityVersionFromUserAgent(userAgent); got != "1.3.5" {
+			t.Fatalf("AntigravityVersionFromUserAgent(%q) = %q, want %q", userAgent, got, "1.3.5")
+		}
 	}
 }
 
@@ -107,10 +109,7 @@ func TestAntigravityVersionFromUserAgentParsesLegacyFamily(t *testing.T) {
 }
 
 func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
-	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
-	defer restore()
-
-	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64)"
+	want := AntigravityUserAgent()
 	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
 		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
 	}
@@ -120,10 +119,7 @@ func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
 }
 
 func TestAntigravityOnboardUserUserAgentUsesLongUA(t *testing.T) {
-	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
-	defer restore()
-
-	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0"
+	want := AntigravityUserAgent() + " google-api-nodejs-client/10.3.0"
 	if got := AntigravityOnboardUserUserAgent(""); got != want {
 		t.Fatalf("AntigravityOnboardUserUserAgent() = %q, want %q", got, want)
 	}
