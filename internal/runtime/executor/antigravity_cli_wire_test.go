@@ -362,12 +362,12 @@ func TestAntigravityWireTLSHTTP11HeaderOrderChunkedAndKeepAlive(t *testing.T) {
 	defer func() { _ = rawLn.Close() }()
 
 	type capturedWireReq struct {
-		connID        int
-		requestLine   string
-		headerNames   []string
-		headerMap     map[string]string
-		decodedBody   []byte
-		alpnOffered   []string
+		connID         int
+		requestLine    string
+		headerNames    []string
+		headerMap      map[string]string
+		decodedBody    []byte
+		alpnOffered    []string
 		negotiatedALPN string
 	}
 	var (
@@ -427,6 +427,12 @@ func TestAntigravityWireTLSHTTP11HeaderOrderChunkedAndKeepAlive(t *testing.T) {
 					var body []byte
 					if strings.Contains(strings.ToLower(hMap["transfer-encoding"]), "chunked") {
 						body, _ = io.ReadAll(httputil.NewChunkedReader(br))
+						for {
+							tl, errTL := br.ReadString('\n')
+							if errTL != nil || strings.TrimRight(tl, "\r\n") == "" {
+								break
+							}
+						}
 					} else if cl, errCL := strconv.Atoi(hMap["content-length"]); errCL == nil && cl > 0 {
 						body = make([]byte, cl)
 						_, _ = io.ReadFull(br, body)
@@ -476,8 +482,8 @@ func TestAntigravityWireTLSHTTP11HeaderOrderChunkedAndKeepAlive(t *testing.T) {
 			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
-	wireTransport := antigravityHTTP11Transport(auth, baseTransport)
-	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", wireTransport)
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", baseTransport)
+	defer closeAntigravityAuthIdleTransports(auth)
 
 	exec := NewAntigravityExecutor(&config.Config{})
 	reqPayload := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello wire"}]}]}`)
@@ -506,7 +512,8 @@ func TestAntigravityWireTLSHTTP11HeaderOrderChunkedAndKeepAlive(t *testing.T) {
 		t.Fatalf("Execute error = %v", errExec)
 	}
 
-	wireTransport.CloseIdleConnections()
+	closeAntigravityAuthIdleTransports(auth)
+	baseTransport.CloseIdleConnections()
 	_ = tlsLn.Close()
 	wg.Wait()
 
