@@ -171,11 +171,27 @@ func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
 		t.Fatalf("IdleConnTimeout = %v, want %v", defaulted.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
 	}
 
-	// When cfg is nil (or default enabled: false), short mode is applied: MaxIdleConnsPerHost = -1
-	defaultDisabled := &http.Transport{}
-	applyAntigravityPoolLimits(defaultDisabled)
-	if defaultDisabled.MaxIdleConnsPerHost != -1 {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want -1 when pooling is disabled by default", defaultDisabled.MaxIdleConnsPerHost)
+	// When cfg is nil (or enabled is omitted), pooling defaults to 2 and 30s;
+	// explicit enabled: false selects short mode (-1).
+	defaultPooled := &http.Transport{}
+	applyAntigravityPoolLimits(defaultPooled)
+	if defaultPooled.MaxIdleConnsPerHost != antigravityDefaultMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d when pooling is enabled by default", defaultPooled.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
+	}
+	if defaultPooled.IdleConnTimeout != antigravityDefaultIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v when pooling is enabled by default", defaultPooled.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
+	}
+	disabledPool := false
+	explicitDisabled := &http.Transport{}
+	applyAntigravityPoolLimits(explicitDisabled, &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &disabledPool,
+			},
+		},
+	})
+	if explicitDisabled.MaxIdleConnsPerHost != -1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want -1 when pooling is explicitly disabled", explicitDisabled.MaxIdleConnsPerHost)
 	}
 
 	applyAntigravityPoolLimits(nil) // must not panic
@@ -713,9 +729,10 @@ func TestAntigravityPoolConfigIdleTimeoutCustomAndCap(t *testing.T) {
 		wantMaxIdle int
 	}{
 		{
-			name:      "default config disables pooling (enabled: false by default)",
-			cfg:       &config.Config{},
-			wantShort: true,
+			name:        "default config enables pooling (2 idle conns, 30s timeout)",
+			cfg:         &config.Config{},
+			wantTimeout: 30 * time.Second,
+			wantMaxIdle: antigravityDefaultMaxIdleConnsPerHost,
 		},
 		{
 			name: "explicit enabled false activates short mode",
@@ -882,7 +899,14 @@ func TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects(t *tes
 	}))
 	defer srv.Close()
 
-	cfg := &config.Config{}
+	enabledFalse := false
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledFalse,
+			},
+		},
+	}
 	auth := antigravityAuthWithProxy(srv.URL)
 
 	const requests = 4
@@ -1022,8 +1046,15 @@ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
 func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) {
 	auth := antigravityAuthWithIDAndProxy("auth-key-separation", "")
 
-	// 1. Client with short connection mode (default enabled: false)
-	cfgShort := &config.Config{}
+	// 1. Client with explicit short connection mode (enabled: false)
+	disabledPool := false
+	cfgShort := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &disabledPool,
+			},
+		},
+	}
 	clientShort := newAntigravityHTTPClient(context.Background(), cfgShort, auth, 0)
 
 	// 2. Client with pooled mode (enabled: true)

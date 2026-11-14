@@ -383,10 +383,10 @@ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.
 	}))
 	defer server.Close()
 
-	// Default config has ConnectionPool.Enabled = nil, which defaults to false (disabled)
-	exec := NewAntigravityExecutor(&config.Config{})
+	// Default config has ConnectionPool.Enabled = nil, which now enables HTTP/1.1 keep-alive pooling
+	execPooled := NewAntigravityExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID:       "antigravity-default-short-auth",
+		ID:       "antigravity-default-pooled-auth",
 		Provider: "antigravity",
 		Metadata: map[string]any{
 			"access_token": "token",
@@ -401,7 +401,38 @@ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.
 		if errRequest != nil {
 			t.Fatalf("request %d: NewRequest() error = %v", i, errRequest)
 		}
-		resp, errDo := exec.HttpRequest(context.Background(), auth, req)
+		resp, errDo := execPooled.HttpRequest(context.Background(), auth, req)
+		if errDo != nil {
+			t.Fatalf("request %d: HttpRequest() error = %v", i, errDo)
+		}
+		_ = resp.Body.Close()
+	}
+
+	mu.Lock()
+	pooledDistinct := len(remotes)
+	remotes = map[string]int{}
+	mu.Unlock()
+	if pooledDistinct != 1 {
+		t.Fatalf("default pooled config: expected 1 reused connection, got %d", pooledDistinct)
+	}
+
+	// Explicit enabled: false still selects short mode without emitting Connection: close
+	enabledFalse := false
+	execShort := NewAntigravityExecutor(&config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledFalse,
+			},
+		},
+	})
+	authShort := auth.Clone()
+	authShort.ID = "antigravity-explicit-short-auth"
+	for i := 0; i < requests; i++ {
+		req, errRequest := http.NewRequest(http.MethodPost, server.URL, nil)
+		if errRequest != nil {
+			t.Fatalf("request %d: NewRequest() error = %v", i, errRequest)
+		}
+		resp, errDo := execShort.HttpRequest(context.Background(), authShort, req)
 		if errDo != nil {
 			t.Fatalf("request %d: HttpRequest() error = %v", i, errDo)
 		}
@@ -413,9 +444,8 @@ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.
 	headers := append([]string(nil), connectionHeaders...)
 	mu.Unlock()
 
-	// With pooling disabled by default, every request opens a fresh connection
 	if distinct != requests {
-		t.Fatalf("default disabled pool: expected %d distinct connections, got %d", requests, distinct)
+		t.Fatalf("explicit disabled pool: expected %d distinct connections, got %d", requests, distinct)
 	}
 
 	// Must never leak Connection: close header to upstream

@@ -12,6 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -149,7 +150,7 @@ func TestIssue6199AntigravityRefreshPublishesTokenWithoutWaitingForCredits(t *te
 			}
 		})
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		manager := cliproxyauth.NewManager(nil, nil, nil)
 		manager.RegisterExecutor(executor)
 		auth := issue6199AntigravityAuth("issue6199-credits", t.Name()+"-refresh")
@@ -228,7 +229,7 @@ func TestIssue6199AntigravityOptionalCreditsRefreshIsDeduplicatedWithoutDeadline
 			}
 		})
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		auth := issue6199AntigravityAuth(t.Name(), t.Name()+"-refresh")
 		t.Cleanup(func() {
 			antigravityCreditsBalanceByAuth.Delete(auth.ID)
@@ -334,7 +335,7 @@ func TestIssue6199AntigravityCreditsRecoverAfterLifecycleCancellation(t *testing
 		})
 		ctx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, ctx, auth)
 		if oldRequest == nil {
 			t.Fatal("old lifecycle credits request did not start")
@@ -409,7 +410,7 @@ func TestIssue6199AntigravityCreditsReplaceOldRegistrationEpoch(t *testing.T) {
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old registration credits request did not start")
@@ -475,7 +476,7 @@ func TestIssue6199AntigravityCanceledCreditsCannotOverwriteReplacementBalance(t 
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old registration credits request did not start")
@@ -536,7 +537,7 @@ func TestIssue6199AntigravityCanceledCreditsRetryWithoutOldThrottle(t *testing.T
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", transport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old credits request did not start")
@@ -573,7 +574,7 @@ func TestIssue6199AntigravityOlderEpochCannotReplaceCompletedCredits(t *testing.
 		}
 		newCalls := 0
 		newCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", makeTransport(900, &newCalls))
-		executor := &AntigravityExecutor{}
+		executor := &AntigravityExecutor{cfg: &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}}
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, newCtx, auth)
 		if newCalls != 1 {
 			t.Fatalf("current epoch credits requests = %d, want 1", newCalls)

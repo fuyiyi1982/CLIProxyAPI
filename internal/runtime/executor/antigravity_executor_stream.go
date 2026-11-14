@@ -132,7 +132,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if replayScope.valid() {
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
-	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, requestPayload, execLease, errReq := e.buildRequestDocWithExecution(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
 		return nil, err
@@ -556,6 +556,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Commit itself rejects partial streams without an upstream terminal.
 			if translatedClaudeErr == nil {
 				commitReplay()
+				if execLease != nil {
+					execLease.Commit()
+				}
 			}
 			for i := range tail {
 				select {

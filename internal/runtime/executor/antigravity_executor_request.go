@@ -25,13 +25,18 @@ import (
 
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, error) {
 	doc := ojson.NewDoc(payload)
-	httpReq, _, err := e.buildRequestDoc(ctx, auth, token, modelName, doc, stream, alt, baseURL, derivedSessionIDs...)
+	httpReq, _, _, err := e.buildRequestDocWithExecution(ctx, auth, token, modelName, doc, stream, alt, baseURL, derivedSessionIDs...)
 	return httpReq, err
 }
 
 func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
+	httpReq, finalPayload, _, err := e.buildRequestDocWithExecution(ctx, auth, token, modelName, doc, stream, alt, baseURL, derivedSessionIDs...)
+	return httpReq, finalPayload, err
+}
+
+func (e *AntigravityExecutor) buildRequestDocWithExecution(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, *helps.AgyExecutionLease, error) {
 	if token == "" {
-		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		return nil, nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	if doc == nil {
 		doc = ojson.NewDoc(nil)
@@ -62,17 +67,64 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 
 	projectID, errProject := e.projectIDForRequest(ctx, auth, token)
 	if errProject != nil {
-		return nil, nil, errProject
+		return nil, nil, nil, errProject
 	}
+
+	explicitSessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
 	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
+
+	reqType := strings.TrimSpace(doc.Get("requestType").String())
+	isImageModel := strings.Contains(modelName, "image")
+	agyModelInfo := helps.ResolveAgyModelInfo(modelName)
+
+	var execLease *helps.AgyExecutionLease
+	if reqType == "agent" && !isImageModel {
+		if store := e.getSessionStore(); store != nil {
+			authID := ""
+			if auth != nil {
+				authID = auth.ID
+			}
+			derivedSessionID := ""
+			if len(derivedSessionIDs) > 0 {
+				derivedSessionID = strings.TrimSpace(derivedSessionIDs[0])
+			}
+			if meta, lease := store.BeginExecution(authID, derivedSessionID, explicitSessionID, doc.Get("request.contents"), agyModelInfo); meta != nil {
+				_ = doc.Set("requestId", meta.RequestID)
+				_ = doc.Set("request.sessionId", meta.NumericSessionID)
+				for _, labelKey := range []string{
+					"last_execution_id",
+					"last_step_index",
+					"model_enum",
+					"trajectory_id",
+					"used_claude",
+					"used_claude_conservative",
+					"used_non_gemini_model",
+				} {
+					if labelVal, ok := meta.Labels[labelKey]; ok {
+						_ = doc.Set("request.labels."+labelKey, labelVal)
+					}
+				}
+				execLease = lease
+			}
+		}
+	}
+
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
-	// Cap maxOutputTokens to model's max_completion_tokens from registry
-	if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+	// Cap or populate maxOutputTokens according to the registry and native CLI model defaults.
+	effectiveCap := agyModelInfo.DefaultMaxOutputTokens
+	if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		if effectiveCap == 0 || modelInfo.MaxCompletionTokens < effectiveCap {
+			effectiveCap = modelInfo.MaxCompletionTokens
+		}
+	}
+	if reqType != "web_search" {
+		if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
+			if effectiveCap > 0 && int(maxOut.Int()) > effectiveCap {
+				_ = doc.Set("request.generationConfig.maxOutputTokens", effectiveCap)
 			}
+		} else if !maxOut.Exists() && agyModelInfo.DefaultMaxOutputTokens > 0 {
+			_ = doc.Set("request.generationConfig.maxOutputTokens", agyModelInfo.DefaultMaxOutputTokens)
 		}
 	}
 
@@ -81,16 +133,13 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
-	if isClaudeModel {
-		if !promptStructuredOutput {
-			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		}
-	} else {
-		_ = doc.Delete("request.generationConfig.maxOutputTokens")
+	if isClaudeModel && !promptStructuredOutput {
+		_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
 	helps.FinalizePayloadDoc(ctx, doc)
+	helps.OrderAgyEnvelopeDoc(doc)
 	finalPayload := doc.Bytes()
 	var (
 		bodyReader io.Reader = bytes.NewReader(finalPayload)
@@ -102,7 +151,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
-		return nil, nil, errReq
+		return nil, nil, nil, errReq
 	}
 	// Deliberately no httpReq.Close: the native Antigravity client omits the
 	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
@@ -111,6 +160,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("Accept", "*/*")
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
@@ -119,6 +169,9 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if stream {
+		helps.ApplyChunkedStreamBody(httpReq, finalPayload)
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -138,7 +191,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		AuthValue: authValue,
 	})
 
-	return httpReq, finalPayload, nil
+	return httpReq, finalPayload, execLease, nil
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
@@ -679,20 +732,24 @@ func resolveLoadCodeAssistUserAgent(auth *cliproxyauth.Auth) string {
 }
 
 func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
-	raw := ""
-	if auth != nil {
-		if auth.Attributes != nil {
-			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
-				raw = ua
-			}
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+			return ua
 		}
-		if raw == "" && auth.Metadata != nil {
-			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
-				raw = strings.TrimSpace(ua)
+	}
+	if auth.Metadata != nil {
+		if ua, ok := auth.Metadata["user_agent"].(string); ok {
+			trimmed := strings.TrimSpace(ua)
+			lower := strings.ToLower(trimmed)
+			if trimmed != "" && !strings.HasPrefix(lower, "antigravity/1.") && !strings.HasPrefix(lower, "antigravity/hub/") {
+				return trimmed
 			}
 		}
 	}
-	return raw
+	return ""
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
