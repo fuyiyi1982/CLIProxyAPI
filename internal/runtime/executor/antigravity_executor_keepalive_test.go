@@ -405,6 +405,7 @@ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.
 		if errDo != nil {
 			t.Fatalf("request %d: HttpRequest() error = %v", i, errDo)
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
 
@@ -436,6 +437,7 @@ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.
 		if errDo != nil {
 			t.Fatalf("request %d: HttpRequest() error = %v", i, errDo)
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
 
