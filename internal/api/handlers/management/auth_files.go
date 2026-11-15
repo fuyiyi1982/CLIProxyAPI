@@ -507,7 +507,7 @@ func isPersistentAuthFailure(auth *coreauth.Auth, now time.Time) bool {
 		return true
 	}
 	// An OAuth credential whose access token is expired cannot be used to serve requests.
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) && !auth.CanRefreshAccessTokenOnDemand(now) {
 		return true
 	}
 	// An explicit token expiration status.

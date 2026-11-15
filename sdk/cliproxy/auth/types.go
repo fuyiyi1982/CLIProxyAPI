@@ -1416,6 +1416,27 @@ func (a *Auth) HasValidAccessToken(now time.Time) bool {
 	return true
 }
 
+// CanRefreshAccessTokenOnDemand reports whether an expired access_token can be
+// renewed lazily during request preparation instead of blocking selection.
+func (a *Auth) CanRefreshAccessTokenOnDemand(now time.Time) bool {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || a.RequiresSignIn {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
+		return false
+	}
+	if ProviderRefreshLead("antigravity", a.Runtime) != nil {
+		return false
+	}
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) || authHasAnyRejectedRefreshPartition(a) {
+		return false
+	}
+	if !now.IsZero() && !a.NextRefreshAfter.IsZero() && a.NextRefreshAfter.After(now) {
+		return false
+	}
+	return strings.TrimSpace(authRefreshToken(a)) != ""
+}
+
 const (
 	RenewalStateSignInRequired        = "sign_in_required"
 	RenewalStateExpiredSignInRequired = "expired_sign_in_required"

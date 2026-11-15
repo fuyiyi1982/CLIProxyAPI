@@ -221,3 +221,51 @@ func waitForAntigravityCreditsRefresh(t *testing.T, state *antigravityCreditsHin
 		t.Fatal("background credits refresh did not finish before test transport cleanup")
 	}
 }
+
+
+func TestAntigravityPrepareRequestAuthRefreshesExpiredTokenWithExistingProjectID(t *testing.T) {
+	resetAntigravityRefreshGroupForTest()
+	t.Cleanup(resetAntigravityRefreshGroupForTest)
+
+	var tokenCalls int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://oauth2.googleapis.com/token" {
+			t.Fatalf("unexpected request URL %s", req.URL.String())
+		}
+		atomic.AddInt32(&tokenCalls, 1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"renewed-tok","refresh_token":"renewed-ref","expires_in":3600,"token_type":"Bearer"}`)),
+		}, nil
+	})
+
+	exec := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{
+		ID:       "agy-existing-project",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token":  "stale-tok",
+			"refresh_token": "valid-ref",
+			"project_id":    "aicode-consumers",
+			"expired":       time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	if !exec.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("expected ShouldPrepareRequestAuth to return true when access_token is expired")
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+	updated, err := exec.PrepareRequestAuth(ctx, auth)
+	if err != nil {
+		t.Fatalf("PrepareRequestAuth error = %v", err)
+	}
+	if updated == nil || updated.Metadata["access_token"] != "renewed-tok" {
+		t.Fatalf("unexpected updated auth: %#v", updated)
+	}
+	if exec.ShouldPrepareRequestAuth(updated) {
+		t.Fatal("expected ShouldPrepareRequestAuth to return false after token renewal")
+	}
+	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
+		t.Fatalf("tokenCalls = %d, want 1", got)
+	}
+}

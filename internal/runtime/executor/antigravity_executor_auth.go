@@ -35,7 +35,21 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
-	return antigravityProjectIDFromAuth(auth) == ""
+	if auth == nil {
+		return false
+	}
+	if antigravityProjectIDFromAuth(auth) == "" {
+		return true
+	}
+	if strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")) == "" {
+		return false
+	}
+	accessToken := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token"))
+	if accessToken == "" {
+		return true
+	}
+	expiry, hasExpiry := auth.ExpirationTime()
+	return hasExpiry && !expiry.IsZero() && !expiry.After(time.Now().Add(antigravityRequestTokenSafetyWindow))
 }
 
 func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -52,6 +66,9 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 		updated = refreshedAuth
 	}
 	if antigravityProjectIDFromAuth(updated) != "" {
+		if refreshedAuth == nil {
+			return nil, nil
+		}
 		return updated, nil
 	}
 
@@ -140,6 +157,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	auth.Metadata["expires_in"] = tokenResp.ExpiresIn
 	now := time.Now()
+	auth.LastRefreshedAt = now
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
