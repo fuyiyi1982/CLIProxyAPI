@@ -138,6 +138,9 @@ func (e *AntigravityExecutor) buildRequestDocWithExecution(ctx context.Context, 
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
+	if auth != nil {
+		helps.SanitizeAntigravityTavernIdentityDoc(doc, auth.Prefix, modelName)
+	}
 	helps.FinalizePayloadDoc(ctx, doc)
 	helps.OrderAgyEnvelopeDoc(doc)
 	finalPayload := doc.Bytes()
