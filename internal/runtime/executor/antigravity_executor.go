@@ -189,6 +189,12 @@ const (
 	// with a 30-second safety margin to eliminate timer race conditions.
 	antigravityMaxAllowedIdleConnTimeout = 210 * time.Second
 
+	// antigravityDefaultResponseHeaderTimeout bounds how long one upstream HTTP/1.1
+	// attempt waits for status and response headers after writing the request body.
+	// With request-retry=1 (2 total attempts), 2 * 75s = 150s stays strictly within
+	// half of downstream 300s stream idle watchdogs while leaving body streaming unbounded.
+	antigravityDefaultResponseHeaderTimeout = 75 * time.Second
+
 	// antigravityAnonymousTransportScope is the pool scope for auth objects that carry
 	// no identity at all. Reaching it means the auth has no ID, no source path and no
 	// token of any kind, so there is no credential to keep isolated and a single shared
@@ -323,6 +329,9 @@ func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *htt
 	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
 	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
 	clone.TLSClientConfig.NextProtos = nil
+	if clone.ResponseHeaderTimeout <= 0 {
+		clone.ResponseHeaderTimeout = antigravityDefaultResponseHeaderTimeout
+	}
 	applyAntigravityPoolLimits(clone, cfgs...)
 	helps.WrapTransportWithAgyWireOrder(clone)
 	return clone

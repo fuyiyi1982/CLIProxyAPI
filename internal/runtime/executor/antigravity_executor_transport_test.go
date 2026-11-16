@@ -1082,3 +1082,72 @@ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) 
 		t.Fatalf("pooled transport MaxIdleConnsPerHost = %d, want %d", trPooled.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
 	}
 }
+
+func TestNewAntigravityHTTPClientDefaultResponseHeaderTimeout(t *testing.T) {
+	ResetAntigravityTransports()
+	t.Cleanup(ResetAntigravityTransports)
+
+	auth := antigravityAuthWithIDAndProxy("rht-default", "")
+	client := newAntigravityHTTPClient(context.Background(), &config.Config{}, auth, 0)
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	if tr.ResponseHeaderTimeout != antigravityDefaultResponseHeaderTimeout {
+		t.Fatalf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, antigravityDefaultResponseHeaderTimeout)
+	}
+
+	// Verify stalled pre-header connection aborts promptly while post-header streaming continues past timeout.
+	releaseStall := make(chan struct{})
+	stalledSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-releaseStall
+	}))
+	defer func() {
+		close(releaseStall)
+		stalledSrv.Close()
+	}()
+
+	fastHeaderTr := cloneTransportWithHTTP11(&http.Transport{ResponseHeaderTimeout: 60 * time.Millisecond})
+	defer fastHeaderTr.CloseIdleConnections()
+	if fastHeaderTr.ResponseHeaderTimeout != 60*time.Millisecond {
+		t.Fatalf("explicit ResponseHeaderTimeout was not preserved: got %v", fastHeaderTr.ResponseHeaderTimeout)
+	}
+	fastClient := &http.Client{Transport: fastHeaderTr}
+	start := time.Now()
+	_, err := fastClient.Get(stalledSrv.URL)
+	if err == nil {
+		t.Fatal("expected stalled response header error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stalled header wait took too long: %v (err=%v)", elapsed, err)
+	}
+
+	streamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		for i := 0; i < 3; i++ {
+			time.Sleep(45 * time.Millisecond)
+			_, _ = fmt.Fprintf(w, "data: chunk-%d\n\n", i)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer streamSrv.Close()
+
+	resp, err := fastClient.Get(streamSrv.URL)
+	if err != nil {
+		t.Fatalf("post-header slow stream failed unexpectedly: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading slow stream body failed: %v", err)
+	}
+	if !strings.Contains(string(body), "chunk-2") {
+		t.Fatalf("unexpected stream body: %q", string(body))
+	}
+}
