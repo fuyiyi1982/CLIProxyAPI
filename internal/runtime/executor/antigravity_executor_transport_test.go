@@ -1093,6 +1093,9 @@ func TestNewAntigravityHTTPClientDefaultResponseHeaderTimeout(t *testing.T) {
 	if !ok || tr == nil {
 		t.Fatalf("expected *http.Transport, got %T", client.Transport)
 	}
+	if antigravityDefaultResponseHeaderTimeout != 240*time.Second {
+		t.Fatalf("antigravityDefaultResponseHeaderTimeout = %v, want 240s", antigravityDefaultResponseHeaderTimeout)
+	}
 	if tr.ResponseHeaderTimeout != antigravityDefaultResponseHeaderTimeout {
 		t.Fatalf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, antigravityDefaultResponseHeaderTimeout)
 	}

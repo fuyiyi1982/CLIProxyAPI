@@ -8,10 +8,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -542,4 +545,264 @@ func (e *transportThenSuccessExecutor) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
+}
+
+func TestIsTransportResponseHeaderTimeoutError_Boundaries(t *testing.T) {
+	stalledSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(300 * time.Millisecond):
+		}
+	}))
+	defer stalledSrv.Close()
+
+	headerTr := &http.Transport{ResponseHeaderTimeout: 25 * time.Millisecond}
+	defer headerTr.CloseIdleConnections()
+	_, realHeaderErr := (&http.Client{Transport: headerTr}).Get(stalledSrv.URL)
+	if realHeaderErr == nil {
+		t.Fatal("expected real ResponseHeaderTimeout error, got nil")
+	}
+	if !errors.Is(realHeaderErr, context.DeadlineExceeded) {
+		t.Fatalf("expected stdlib ResponseHeaderTimeout to satisfy errors.Is(context.DeadlineExceeded), got %v", realHeaderErr)
+	}
+	if !isTransportResponseHeaderTimeoutError(realHeaderErr) {
+		t.Fatalf("isTransportResponseHeaderTimeoutError(%v) = false, want true", realHeaderErr)
+	}
+	if isConnectionLifecycleError(realHeaderErr) {
+		t.Fatalf("isConnectionLifecycleError(%v) = true, want false", realHeaderErr)
+	}
+	if !isTransientTransportError(realHeaderErr) {
+		t.Fatalf("isTransientTransportError(%v) = false, want true", realHeaderErr)
+	}
+	rerr := resultErrorFromError(realHeaderErr)
+	if rerr.Code != transientTransportErrorCode {
+		t.Fatalf("resultErrorFromError code = %q, want %q", rerr.Code, transientTransportErrorCode)
+	}
+	if !shouldSkipCredentialCooldown(rerr) {
+		t.Fatalf("shouldSkipCredentialCooldown(%#v) = false, want true", rerr)
+	}
+
+	clientTimeoutClient := &http.Client{Timeout: 25 * time.Millisecond}
+	_, clientTimeoutErr := clientTimeoutClient.Get(stalledSrv.URL)
+	if clientTimeoutErr == nil {
+		t.Fatal("expected Client.Timeout error, got nil")
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "real response header timeout", err: realHeaderErr, want: true},
+		{name: "wrapped real response header timeout", err: fmt.Errorf("upstream post failed: %w", realHeaderErr), want: true},
+		{name: "joined with configured tls timeout", err: errors.Join(realHeaderErr, cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded)), want: true},
+		{name: "client timeout wrapper", err: clientTimeoutErr, want: false},
+		{name: "raw context deadline exceeded", err: context.DeadlineExceeded, want: false},
+		{name: "url error wrapping context deadline", err: &url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded}, want: false},
+		{name: "context canceled", err: context.Canceled, want: false},
+		{name: "plaintext message only", err: errors.New("net/http: timeout awaiting response headers"), want: false},
+		{name: "composite wrapping context deadline", err: fmt.Errorf("net/http: timeout awaiting response headers: %w", context.DeadlineExceeded), want: false},
+		{name: "joined with caller cancel", err: errors.Join(realHeaderErr, context.Canceled), want: false},
+		{name: "joined with caller deadline", err: errors.Join(realHeaderErr, context.DeadlineExceeded), want: false},
+		{name: "status bearing error", err: &statusBearingError{status: http.StatusGatewayTimeout, msg: "net/http: timeout awaiting response headers"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransportResponseHeaderTimeoutError(tc.err); got != tc.want {
+				t.Fatalf("isTransportResponseHeaderTimeoutError(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+			if got := isTransientTransportError(tc.err); got != tc.want {
+				t.Fatalf("isTransientTransportError(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+type realHeaderTimeoutExecutor struct {
+	identifier string
+	client     *http.Client
+	url        string
+	calls      atomic.Int32
+}
+
+func (e *realHeaderTimeoutExecutor) Identifier() string { return e.identifier }
+
+func (e *realHeaderTimeoutExecutor) doAttempt(ctx context.Context) ([]byte, error) {
+	e.calls.Add(1)
+	req, errNew := http.NewRequestWithContext(ctx, http.MethodPost, e.url, nil)
+	if errNew != nil {
+		return nil, errNew
+	}
+	resp, errDo := e.client.Do(req)
+	if errDo != nil {
+		return nil, errDo
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+func (e *realHeaderTimeoutExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	body, err := e.doAttempt(ctx)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: body}, nil
+}
+
+func (e *realHeaderTimeoutExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	body, err := e.doAttempt(ctx)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: body}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (*realHeaderTimeoutExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *realHeaderTimeoutExecutor) CountTokens(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	body, err := e.doAttempt(ctx)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: body}, nil
+}
+
+func (*realHeaderTimeoutExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestManager_RetriesRealResponseHeaderTimeoutWithoutCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	for _, kind := range []string{"execute", "stream", "count"} {
+		t.Run(kind+"/recovers_on_retry", func(t *testing.T) {
+			var reqCount atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if reqCount.Add(1) == 1 {
+					select {
+					case <-r.Context().Done():
+					case <-time.After(200 * time.Millisecond):
+					}
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			}))
+			defer srv.Close()
+
+			tr := &http.Transport{ResponseHeaderTimeout: 30 * time.Millisecond}
+			defer tr.CloseIdleConnections()
+
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(1, 0, 0)
+			exec := &realHeaderTimeoutExecutor{
+				identifier: "antigravity",
+				client:     &http.Client{Transport: tr},
+				url:        srv.URL,
+			}
+			m.RegisterExecutor(exec)
+			model := "header-retry-" + uuid.NewString()
+			authID := "header-auth-" + uuid.NewString()
+			registry.GetGlobalRegistry().RegisterClient(authID, exec.Identifier(), []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: exec.Identifier()}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			req := cliproxyexecutor.Request{Model: model}
+			var got []byte
+			var errCall error
+			switch kind {
+			case "execute":
+				var resp cliproxyexecutor.Response
+				resp, errCall = m.Execute(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+				got = resp.Payload
+			case "stream":
+				var stream *cliproxyexecutor.StreamResult
+				stream, errCall = m.ExecuteStream(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+				if errCall == nil {
+					for chunk := range stream.Chunks {
+						if chunk.Err != nil {
+							errCall = chunk.Err
+							break
+						}
+						got = append(got, chunk.Payload...)
+					}
+				}
+			default:
+				var resp cliproxyexecutor.Response
+				resp, errCall = m.ExecuteCount(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+				got = resp.Payload
+			}
+
+			if errCall != nil {
+				t.Fatalf("%s failed unexpectedly instead of retrying ResponseHeaderTimeout: %v", kind, errCall)
+			}
+			if string(got) != "ok" {
+				t.Fatalf("%s payload = %q, want %q", kind, string(got), "ok")
+			}
+			if calls := exec.calls.Load(); calls != 2 {
+				t.Fatalf("%s calls = %d, want 2", kind, calls)
+			}
+			assertNoCooldown(t, m, authID, model)
+		})
+
+		t.Run(kind+"/exhausted_preserves_deadline_for_504", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(200 * time.Millisecond):
+				}
+			}))
+			defer srv.Close()
+
+			tr := &http.Transport{ResponseHeaderTimeout: 25 * time.Millisecond}
+			defer tr.CloseIdleConnections()
+
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(1, 0, 0)
+			exec := &realHeaderTimeoutExecutor{
+				identifier: "antigravity",
+				client:     &http.Client{Transport: tr},
+				url:        srv.URL,
+			}
+			m.RegisterExecutor(exec)
+			model := "header-exhaust-" + uuid.NewString()
+			authID := "header-exhaust-auth-" + uuid.NewString()
+			registry.GetGlobalRegistry().RegisterClient(authID, exec.Identifier(), []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: exec.Identifier()}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			req := cliproxyexecutor.Request{Model: model}
+			var errCall error
+			switch kind {
+			case "execute":
+				_, errCall = m.Execute(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+			case "stream":
+				_, errCall = m.ExecuteStream(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+			default:
+				_, errCall = m.ExecuteCount(context.Background(), []string{exec.Identifier()}, req, cliproxyexecutor.Options{})
+			}
+
+			if errCall == nil {
+				t.Fatalf("%s error = nil, want exhausted timeout error", kind)
+			}
+			if !errors.Is(errCall, context.DeadlineExceeded) {
+				t.Fatalf("%s terminal error = %v, want errors.Is(context.DeadlineExceeded) for 504 mapping", kind, errCall)
+			}
+			if calls := exec.calls.Load(); calls != 2 {
+				t.Fatalf("%s calls = %d, want 2 (1 initial + 1 retry)", kind, calls)
+			}
+			assertNoCooldown(t, m, authID, model)
+		})
+	}
 }

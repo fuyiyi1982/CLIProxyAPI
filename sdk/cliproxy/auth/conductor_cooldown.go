@@ -3024,9 +3024,9 @@ func resultErrorFromError(err error) *Error {
 		// Prefer true request-scoped faults (including Claude OAuth cancellation)
 		// over the broader connection-lifecycle classification.
 		resultErr.Code = requestScopedErrorCode
-	case isConfiguredTLSHandshakeTimeoutError(err):
-		// An internal TLS establishment deadline is a transient transport
-		// failure, not a caller-owned context lifecycle event.
+	case isConfiguredTLSHandshakeTimeoutError(err) || isTransportResponseHeaderTimeoutError(err):
+		// An internal TLS establishment deadline or HTTP ResponseHeaderTimeout
+		// is a transient transport failure, not a caller-owned context lifecycle event.
 		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
 			resultErr.Code = transientTransportErrorCode
 		}
@@ -3072,7 +3072,7 @@ func isConnectionLifecycleError(err error) bool {
 	if statusCodeFromError(err) != 0 {
 		return false
 	}
-	if isConfiguredTLSHandshakeTimeoutError(err) {
+	if isConfiguredTLSHandshakeTimeoutError(err) || isTransportResponseHeaderTimeoutError(err) {
 		return false
 	}
 	// Client abort and request-scoped timeouts are not credential faults.
@@ -3140,6 +3140,80 @@ func isConfiguredTLSHandshakeTimeoutError(err error) bool {
 	return cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err)
 }
 
+// isTransportResponseHeaderTimeoutError identifies Go net/http and http2
+// ResponseHeaderTimeout leaf errors ("net/http: timeout awaiting response headers"
+// and "http2: timeout awaiting response headers"). net/http's timeoutError.Is
+// matches context.DeadlineExceeded, so checking errors.Is(err, context.DeadlineExceeded)
+// before recognizing this leaf would suppress request-retry and misclassify it as
+// a caller deadline. Any unowned context.Canceled/context.DeadlineExceeded node
+// elsewhere in the error tree still wins.
+func isTransportResponseHeaderTimeoutError(err error) bool {
+	if err == nil || statusCodeFromError(err) != 0 {
+		return false
+	}
+	foundHeaderTimeout, hasUnownedContextError := inspectTransportResponseHeaderTimeout(err)
+	return foundHeaderTimeout && !hasUnownedContextError
+}
+
+func inspectTransportResponseHeaderTimeout(err error) (foundHeaderTimeout bool, hasUnownedContextError bool) {
+	if err == nil {
+		return false, false
+	}
+	if isOwnHTTPResponseHeaderTimeoutNode(err) {
+		return true, false
+	}
+	if configured, ok := err.(*cliproxyexecutor.ConfiguredTLSHandshakeTimeoutError); ok && configured != nil {
+		return false, false
+	}
+	hasUnownedContextError = authHasOwnContextIdentity(err)
+	for _, child := range authUnwrapChildErrors(err) {
+		childFound, childUnowned := inspectTransportResponseHeaderTimeout(child)
+		foundHeaderTimeout = foundHeaderTimeout || childFound
+		hasUnownedContextError = hasUnownedContextError || childUnowned
+	}
+	return foundHeaderTimeout, hasUnownedContextError
+}
+
+func isOwnHTTPResponseHeaderTimeoutNode(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if msg != "net/http: timeout awaiting response headers" && msg != "http2: timeout awaiting response headers" {
+		return false
+	}
+	timeoutErr, okTimeout := err.(interface{ Timeout() bool })
+	tempErr, okTemp := err.(interface{ Temporary() bool })
+	if !okTimeout || !okTemp || !timeoutErr.Timeout() || !tempErr.Temporary() {
+		return false
+	}
+	return len(authUnwrapChildErrors(err)) == 0
+}
+
+func authHasOwnContextIdentity(err error) bool {
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return true
+	}
+	if checker, ok := err.(interface{ Is(error) bool }); ok {
+		return checker.Is(context.Canceled) || checker.Is(context.DeadlineExceeded)
+	}
+	return false
+}
+
+func authUnwrapChildErrors(err error) []error {
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		if children := multi.Unwrap(); len(children) > 0 {
+			return children
+		}
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		if child := single.Unwrap(); child != nil {
+			return []error{child}
+		}
+	}
+	return nil
+}
+
 // isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures that
 // should retry under request-retry without cooling the selected credential.
 func isTransientTransportError(err error) bool {
@@ -3150,7 +3224,7 @@ func isTransientTransportError(err error) bool {
 	if statusCodeFromError(err) != 0 {
 		return false
 	}
-	if isConfiguredTLSHandshakeTimeoutError(err) {
+	if isConfiguredTLSHandshakeTimeoutError(err) || isTransportResponseHeaderTimeoutError(err) {
 		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
