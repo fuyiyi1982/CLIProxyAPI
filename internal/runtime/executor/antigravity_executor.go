@@ -191,9 +191,9 @@ const (
 
 	// antigravityDefaultResponseHeaderTimeout bounds how long one upstream HTTP/1.1
 	// attempt waits for status and response headers after writing the request body.
-	// With request-retry=1 (2 total attempts), 2 * 75s = 150s stays strictly within
-	// half of downstream 300s stream idle watchdogs while leaving body streaming unbounded.
-	antigravityDefaultResponseHeaderTimeout = 75 * time.Second
+	// Raised to 240s so slow buffered first-chunk responses (such as tool-forced calls)
+	// complete without premature 504s while still capping stalled sockets.
+	antigravityDefaultResponseHeaderTimeout = 240 * time.Second
 
 	// antigravityAnonymousTransportScope is the pool scope for auth objects that carry
 	// no identity at all. Reaching it means the auth has no ID, no source path and no
