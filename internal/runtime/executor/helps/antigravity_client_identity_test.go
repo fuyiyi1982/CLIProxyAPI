@@ -49,6 +49,29 @@ func TestAntigravityTavernClientIdentity(t *testing.T) {
 	}
 }
 
+func TestAntigravityTavernClientIdentityVariants(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"You are an AI assistant for DeepSeek Harness. Keep this same-line persona.", "You are an AI coding assistant. Keep this same-line persona."},
+		{"You are an AI agent, built for DeepSeek Harness.", "You are an AI coding assistant."},
+		{"You are DeepSeek Harness, an agentic environment. Keep this.", "You are an AI coding assistant. Keep this."},
+		{"You are DeepSeek Harness. Keep this.", "You are an AI coding assistant. Keep this."},
+		{"You are an AI agent powered by Deep\u200bSeek Har\u200bness.", "You are an AI coding assistant."},
+		{"You are Claude Code, Anthropic's official CLI for Claude.\nYou are Yuika.", "You are an AI coding assistant.\nYou are Yuika."},
+		{"You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are an AI coding assistant."},
+		{"You are Codex, an agent based on GPT-5.", "You are an AI coding assistant."},
+		{"You are omp, an interactive CLI coding agent.", "You are an AI coding assistant."},
+		{"You are a personal assistant running inside OpenClaw.", "You are an AI coding assistant."},
+	}
+	for _, tc := range cases {
+		if got := normalizeAntigravityClientIdentity(tc.in); got != tc.want {
+			t.Fatalf("normalize(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestAntigravityTavernClientIdentityIsolation(t *testing.T) {
 	identity := "You are an AI agent powered by DeepSeek Harness."
 	for _, tc := range []struct{ prefix, model string }{{"shared", "gemini-4-argon"}, {"", "gemini-4-argon"}, {"tavern", "claude-sonnet"}, {"tavern", "gpt-oss"}} {
@@ -59,7 +82,15 @@ func TestAntigravityTavernClientIdentityIsolation(t *testing.T) {
 			t.Fatalf("unexpected mutation: %+v", tc)
 		}
 	}
-	for _, text := range []string{"You are an AI agent powered by another service.", "DeepSeek Harness documentation", "You are Yuika.", "", "You are an AI assistant powered by Example Harness."} {
+	for _, text := range []string{
+		"You are an AI agent powered by another service.",
+		"DeepSeek Harness documentation",
+		"You are Yuika.",
+		"",
+		"You are an AI assistant powered by Example Harness.",
+		"You are an AI assistant. You work for DeepSeek Harness.",
+		"Hello \ufeff world.",
+	} {
 		if normalizeAntigravityClientIdentity(text) != text {
 			t.Fatalf("ordinary text changed: %q", text)
 		}
