@@ -9,18 +9,48 @@ import (
 )
 
 // Normalize only the client identity declaration, not the surrounding persona.
-var antigravityHarnessIdentity = regexp.MustCompile(`(?i)\bYou are (?:an? (?:AI |coding |autonomous )*(?:agent|assistant) powered by DeepSeek Harness|DeepSeek Harness)\b[.]?`)
+var antigravityHarnessIdentity = regexp.MustCompile(
+	`(?i)\bYou are (?:an? (?:AI |coding |autonomous )*(?:agent|assistant)[^.\r\n]{0,40}?\b(?:powered by|for) DeepSeek Harness|DeepSeek Harness(?:,\s*[^.\r\n]{0,80})?)\b[.]?`,
+)
+var antigravityThirdPartyIdentity = regexp.MustCompile(
+	`(?im)^([ \t]*)You are (?:a Claude agent, built on Anthropic's Claude Agent SDK|Claude Code, Anthropic's official CLI for Claude|Codex, an agent based on GPT-[^\r\n]*|omp, an interactive CLI coding agent|a personal assistant running inside OpenClaw)[^\r\n]*`,
+)
 var antigravityIdentityInvisible = strings.NewReplacer("\u200b", "", "\u200c", "", "\u200d", "", "\ufeff", "", "\u034f", "")
 
 func normalizeAntigravityClientIdentity(text string) string {
-	if !strings.Contains(strings.ToLower(text), "harness") {
+	if text == "" {
 		return text
 	}
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "you are") {
+		return text
+	}
+	hasInvis := strings.ContainsAny(text, "\u200b\u200c\u200d\ufeff\u034f")
+	maybeHarness := hasInvis || strings.Contains(lower, "harness")
+	maybeThirdParty := hasInvis ||
+		strings.Contains(lower, "clau"+"de") ||
+		strings.Contains(lower, "co"+"dex") ||
+		strings.Contains(lower, "omp") ||
+		strings.Contains(lower, "open"+"claw")
+	if !maybeHarness && !maybeThirdParty {
+		return text
+	}
+
 	normalized := antigravityIdentityInvisible.Replace(text)
-	if !antigravityHarnessIdentity.MatchString(normalized) {
+	out := normalized
+	changed := false
+	if antigravityHarnessIdentity.MatchString(out) {
+		out = antigravityHarnessIdentity.ReplaceAllString(out, "You are an AI coding assistant.")
+		changed = true
+	}
+	if antigravityThirdPartyIdentity.MatchString(out) {
+		out = antigravityThirdPartyIdentity.ReplaceAllString(out, "${1}You are an AI coding assistant.")
+		changed = true
+	}
+	if !changed {
 		return text
 	}
-	return antigravityHarnessIdentity.ReplaceAllString(normalized, "You are an AI coding assistant.")
+	return out
 }
 
 // SanitizeAntigravityTavernIdentityDoc normalizes a known incompatible client
