@@ -2,10 +2,10 @@ package helps
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 )
 
 // Normalize only the client identity declaration, not the surrounding persona.
