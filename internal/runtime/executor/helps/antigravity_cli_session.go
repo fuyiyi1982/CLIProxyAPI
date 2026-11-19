@@ -33,6 +33,22 @@ func ResolveAgyModelInfo(modelName string) AgyModelInfo {
 	normalized = strings.TrimPrefix(normalized, "models/")
 
 	switch normalized {
+	case "gemini-4-neon-high", "gemini-4-neon":
+		return AgyModelInfo{EnumString: "M532", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-neon-medium":
+		return AgyModelInfo{EnumString: "M533", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-neon-low":
+		return AgyModelInfo{EnumString: "M534", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-neon-xhigh":
+		return AgyModelInfo{EnumString: "M535", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-hydrogen-high", "gemini-4-hydrogen":
+		return AgyModelInfo{EnumString: "M525", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-hydrogen-medium":
+		return AgyModelInfo{EnumString: "M526", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-hydrogen-low":
+		return AgyModelInfo{EnumString: "M527", DefaultMaxOutputTokens: 262144}
+	case "gemini-4-hydrogen-xhigh":
+		return AgyModelInfo{EnumString: "M528", DefaultMaxOutputTokens: 262144}
 	case "gemini-3.1-pro-high":
 		return AgyModelInfo{EnumString: "M438", DefaultMaxOutputTokens: 65535}
 	case "gemini-3.1-pro-low":
